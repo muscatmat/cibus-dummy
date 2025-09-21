@@ -1,0 +1,143 @@
+name: Build and Deploy Mobile Apps
+
+on:
+  workflow_run:
+    workflows: ["Build Web App"]
+    types:
+      - completed
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      skip_ios:
+        description: 'Skip iOS build'
+        required: false
+        default: false
+        type: boolean
+      skip_android:
+        description: 'Skip Android build'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  mobile:
+    name: Build Mobile Apps
+    runs-on: macos-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: 'mobile/package-lock.json'
+        
+    - name: Download web build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: web-dist
+        path: web/dist/
+        
+    - name: Install mobile dependencies
+      working-directory: ./mobile
+      run: npm ci
+
+    - name: Setup Ruby and Bundler cache
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: '3.1'
+        bundler-cache: true
+        
+    - name: Setup JDK for Android
+      if: ${{ !inputs.skip_android }}
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        
+    - name: Setup Android SDK
+      if: ${{ !inputs.skip_android }}
+      uses: android-actions/setup-android@v3
+      
+    - name: Setup Xcode
+      if: ${{ !inputs.skip_ios }}
+      uses: maxim-lobanov/setup-xcode@v1
+      with:
+        xcode-version: latest-stable
+        
+    - name: Install Fastlane
+      run: bundle install
+        
+    - name: Sync Capacitor
+      working-directory: ./mobile
+      run: |
+        npx cap sync
+        npm run patch:security
+        
+    - name: Generate release notes with Gemini
+      id: release_notes
+      run: |
+        if ! command -v gemini &> /dev/null; then
+          echo "Gemini CLI not found, using commit log for release notes."
+          NOTES=$(git log --oneline -10 --pretty=format:"%h %s" || echo "No recent commits found")
+        else
+          echo "Generating release notes from recent commits..."
+          COMMITS=$(git log --oneline -10 --pretty=format:"%h %s" || echo "No recent commits found")
+          NOTES=$(echo "Generate concise release notes from these commits: $COMMITS" | gemini --model=gemini-pro)
+        fi
+        echo "Generated release notes: $NOTES"
+        echo "release_notes=$NOTES" >> $GITHUB_OUTPUT
+        
+    - name: Security scan with Claude
+      run: |
+        if ! command -v claude &> /dev/null; then
+          echo "Claude CLI not found, skipping security scan."
+        else
+          echo "Running security analysis..."
+          DIFF=$(git diff HEAD~5..HEAD || echo "No recent changes")
+          echo "Analyzing code changes for security issues..."
+          echo "$DIFF" | claude --prompt="Analyze this git diff for potential security vulnerabilities or risky changes. Focus on authentication, data handling, and API usage. Provide a brief summary."
+        fi
+        
+    - name: Configure Android signing
+      if: ${{ !inputs.skip_android }}
+      run: |
+        echo "STORE_FILE=${{ secrets.ANDROID_KEYSTORE_BASE64 }}" > android/app/keystore.properties
+        echo "STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> android/app/keystore.properties
+        echo "KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> android/app/keystore.properties
+        echo "KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}" >> android/app/keystore.properties
+      working-directory: ./mobile
+
+    - name: Deploy to Play Store
+      if: ${{ !inputs.skip_android && github.ref == 'refs/heads/main' }}
+      working-directory: ./fastlane
+      env:
+        GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+      run: |
+        echo "$GOOGLE_PLAY_SERVICE_ACCOUNT_JSON" > play-service-account.json
+        bundle exec fastlane android release
+        
+    - name: Deploy to TestFlight
+      if: ${{ !inputs.skip_ios && github.ref == 'refs/heads/main' }}
+      working-directory: ./fastlane
+      env:
+        FASTLANE_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+        APPLE_ID: ${{ secrets.APPLE_ID }}
+        TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+        APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+      run: |
+        echo "$APP_STORE_CONNECT_API_KEY" > AuthKey.p8
+        bundle exec fastlane ios beta
+        
+    - name: Cleanup sensitive files
+      if: always()
+      run: |
+        rm -f fastlane/play-service-account.json
+        rm -f fastlane/AuthKey.p8
+        rm -f mobile/android/app/keystore.properties

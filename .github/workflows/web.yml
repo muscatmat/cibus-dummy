@@ -1,0 +1,63 @@
+name: Build Web App
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'web/**'
+      - '.github/workflows/web.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'web/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Lovable React App
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: 'web/package-lock.json'
+        
+    - name: Install dependencies
+      working-directory: ./web
+    - name: Install dependencies
+      working-directory: ./web
+      run: npm ci
+      
+    - name: Create environment file
+      working-directory: ./web
+      run: |
+        echo "VITE_API_BASE_URL=https://www.themealdb.com/api/json/v1/1" > .env
+        
+    - name: Lint code
+      working-directory: ./web
+      run: npm run lint
+      
+    - name: Build application
+      working-directory: ./web
+      run: npm run build
+      
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: web-dist
+        path: web/dist/
+        retention-days: 7
+        
+    - name: Upload to Lovable (if main branch)
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: |
+        echo "🚀 This is where you'd sync back to Lovable"
+        echo "   For example: lovable-cli deploy --project-id \${{ secrets.LOVABLE_PROJECT_ID }}"
+        echo "   Or trigger a webhook to update the Lovable project"
+        # Add actual Lovable sync command here when available
